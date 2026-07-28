@@ -877,20 +877,18 @@ c10::intrusive_ptr<TorchWork> TorchCommXCCL::all_reduce(
     return work;
   }
 
-  // PreMulSum/AVG are not fully supported yet so we convert all
-  // PreMulSum/AVG ops to SUM and apply workarounds manually.
+  // PreMulSum is not fully supported yet so we convert PreMulSum ops to SUM
+  // and apply the scaling factor manually. AVG is passed through to oneCCL
+  // natively.
   //
   // PREMUL_SUM issue: https://github.com/uxlfoundation/oneCCL/issues/196
-  // AVG issue: https://github.com/uxlfoundation/oneCCL/issues/195
   //
-  // TODO: remove this workaround when oneCCL fully supports PREMUL_SUM/AVG
+  // TODO: remove this workaround when oneCCL fully supports PREMUL_SUM
   // reductions natively.
   const auto maybe_new_op = [&]() -> ReduceOp {
     if (op == ReduceOp::RedOpType::PREMUL_SUM) {
       MAYBE_STREAM_GUARD(guard, stream, device_.type());
       applyPreMulFactor(tensor, op);
-      return ReduceOp(ReduceOp::RedOpType::SUM);
-    } else if (op == ReduceOp::RedOpType::AVG) {
       return ReduceOp(ReduceOp::RedOpType::SUM);
     }
     return op;
@@ -908,24 +906,6 @@ c10::intrusive_ptr<TorchWork> TorchCommXCCL::all_reduce(
           xccl_comm_,
           stream),
       "XCCL allReduce failed");
-
-  if (op == ReduceOp::RedOpType::AVG) {
-    // For scale-out all_reduce with AVG, oneCCL does not support AVG
-    // reduction natively on this path. We therefore perform a SUM across all
-    // ranks and then divide the result in-place by comm_size on every rank to
-    // obtain the correct average value on all ranks.
-    c10::optional<c10::string_view> rounding_mode = c10::nullopt;
-    if (c10::isIntegralType(tensor.scalar_type(), /*includeBool*/ false)) {
-      // For integer tensors, we use truncation-based division to keep an
-      // integer result while matching typical integer division semantics for
-      // negative values (round toward zero).
-      rounding_mode = "trunc";
-    }
-    {
-      MAYBE_STREAM_GUARD(guard, stream, device_.type());
-      tensor.div_(comm_size_, rounding_mode);
-    }
-  }
 
   work->recordEnd();
 

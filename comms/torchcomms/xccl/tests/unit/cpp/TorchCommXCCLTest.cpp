@@ -766,7 +766,7 @@ TEST_F(TorchCommXCCLTest, AllReduce_SyncOp_Success) {
 // 6. AVG AND PREMUL_SUM REDUCTION TESTS
 // ============================================================================
 
-TEST_F(TorchCommXCCLTest, AllReduceAvgDividesByCommSize) {
+TEST_F(TorchCommXCCLTest, AllReduceAvgPassesAvgToOneCCL) {
   xpu_mock_->setupDefaultBehaviors();
   xccl_mock_->setupDefaultBehaviors();
   setupRankAndSize(0, 2);
@@ -776,20 +776,20 @@ TEST_F(TorchCommXCCLTest, AllReduceAvgDividesByCommSize) {
 
   setupEventsForWork(*comm, 1);
 
-  // Tensor of all 4.0 values; AVG with comm_size=2 should give 2.0
   auto tensor = createTestTensor({2, 2});
   tensor.fill_(4.0);
 
-  // AVG is converted to SUM, so the mock sees onecclSum
-  EXPECT_CALL(*xccl_mock_, allReduce(_, _, _, _, onecclSum, _, _))
+  // AVG is passed through to oneCCL natively, so the mock sees onecclAvg.
+  // The mock does not perform the reduction, so the tensor is left unchanged
+  // (no manual post-division is applied).
+  EXPECT_CALL(*xccl_mock_, allReduce(_, _, _, _, onecclAvg, _, _))
       .WillOnce(Return(onecclSuccess));
   EXPECT_CALL(*xpu_mock_, eventQuery(_)).WillRepeatedly(Return(XPU_SUCCESS));
 
   auto work = comm->all_reduce(tensor, ReduceOp::AVG, true, AllReduceOptions());
   work->wait();
 
-  // After all_reduce with AVG, tensor should be divided by comm_size (2)
-  EXPECT_TRUE(tensor.eq(2.0).all().item<bool>());
+  EXPECT_TRUE(tensor.eq(4.0).all().item<bool>());
   comm->finalize();
   EXPECT_EQ(work->status(), TorchWork::WorkStatus::COMPLETED);
 }
